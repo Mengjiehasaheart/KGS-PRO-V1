@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360">
+  <defs>
+    <style>
+      .axis { stroke: #000; stroke-width: 2; fill: none; }
+      .grid { stroke: #ddd; stroke-width: 1; fill: none; }
+      .label { font: 14px Arial; fill: #000; font-weight: 700; }
+      .text { font: 13px Arial; fill: #000; }
+      .curve-inc { stroke: #228B22; stroke-width: 3; fill: none; }
+      .curve-dec { stroke: #ff8c00; stroke-width: 3; fill: none; }
+      .phase-hi { fill: #ffe0b2; opacity: 0.35; }
+      .phase-lo { fill: #cce5ff; opacity: 0.35; }
+      .tick { stroke: #000; stroke-width: 1; }
+    </style>
+  </defs>
+  <!-- Axes -->
+  <line class="axis" x1="60" y1="300" x2="700" y2="300"/>
+  <line class="axis" x1="60" y1="40" x2="60" y2="300"/>
+  <!-- Phase shading -->
+  <rect class="phase-lo" x="60" y="40" width="140" height="260"/>
+  <rect class="phase-hi" x="200" y="40" width="320" height="260"/>
+  <rect class="phase-lo" x="520" y="40" width="180" height="260"/>
+  <text class="text" x="80" y="60">Low Light</text>
+  <text class="text" x="340" y="60">High Light</text>
+  <text class="text" x="540" y="60">Low Light 2</text>
+  <!-- Ticks -->
+  <line class="tick" x1="60" y1="180" x2="66" y2="180"/>
+  <text class="text" x="20" y="185">gs</text>
+  <line class="tick" x1="200" y1="300" x2="200" y2="294"/>
+  <line class="tick" x1="520" y1="300" x2="520" y2="294"/>
+  <!-- Increase curve: g = gsmin + Δ(1 - exp(-(t-tlag)/tau)) -->
+  <path class="curve-inc" d="M 60 250 C 120 245, 180 240, 200 238 C 260 210, 340 170, 400 150 C 460 135, 520 128, 580 126"/>
+  <!-- Decrease curve: g = gsmin + Δ exp(-(t-tlag)/tau) -->
+  <path class="curve-dec" d="M 520 126 C 560 140, 600 165, 640 200 C 670 235, 690 255, 700 262"/>
+  <!-- Labels -->
+  <text class="label" x="360" y="330">time (min)</text>
+  <text class="label" x="12" y="24" transform="rotate(-90 12,24)">gsw (mol m⁻² s⁻¹)</text>
+  <text class="text" x="250" y="95">g(t) = gs_min + Δgs · [1 − e^{−(t − tlag)/τ}]</text>
+  <text class="text" x="520" y="115">g(t) = gs_min + Δgs · e^{−(t − tlag)/τ}</text>
+</svg>

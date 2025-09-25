@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" viewBox="0 0 720 420">
+  <defs>
+    <style>
+      .axis { stroke: #000; stroke-width: 2; fill: none; }
+      .label { font: 16px Arial; fill: #000; font-weight: 700; }
+      .text  { font: 13px Arial; fill: #000; }
+      .apot  { stroke: #1f77b4; stroke-width: 3; fill: none; }
+      .ameas { stroke: #d62728; stroke-width: 3; fill: none; }
+      .amax  { stroke: #2ca02c; stroke-width: 3; fill: none; stroke-dasharray: 8 6; }
+      .brace { stroke: #000; stroke-width: 1.5; fill: none; }
+      .slbox { fill: #f9e0e0; opacity: 0.6; }
+      .blbox { fill: #e0f5e0; opacity: 0.6; }
+    </style>
+  </defs>
+
+  <!-- Axes -->
+  <line class="axis" x1="60" y1="360" x2="700" y2="360"/>
+  <line class="axis" x1="60" y1="60" x2="60" y2="360"/>
+  <text class="label" x="350" y="395">time (min)</text>
+  <text class="label" transform="rotate(-90 20,210)" x="20" y="210">Assimilation A (µmol m⁻² s⁻¹)</text>
+
+  <!-- A curves: measured, potential, maximum -->
+  <path class="ameas" d="M 60 320 C 140 315, 220 300, 260 260 C 300 220, 360 180, 420 170 C 480 165, 560 175, 650 200" />
+  <path class="apot"  d="M 60 320 C 140 310, 220 290, 260 240 C 300 200, 360 150, 420 140 C 480 135, 560 140, 650 150" />
+  <path class="amax"  d="M 60 300 C 140 290, 220 280, 260 235 C 300 195, 360 140, 420 130 C 480 120, 560 120, 650 120" />
+
+  <!-- Legend -->
+  <rect x="430" y="65" width="10" height="3" fill="#d62728" />
+  <text class="text" x="446" y="70">A (measured)</text>
+  <rect x="430" y="85" width="10" height="3" fill="#1f77b4" />
+  <text class="text" x="446" y="90">A_pot (no stomatal limit, Ci)</text>
+  <line x1="430" y1="105" x2="440" y2="105" class="amax" />
+  <text class="text" x="446" y="110">A_max (biochemical & light only)</text>
+
+  <!-- SL and BL illustration at a time slice -->
+  <line x1="500" y1="200" x2="500" y2="360" stroke="#555" stroke-dasharray="4 4"/>
+  <rect x="500" y="200" width="16" height="40" class="blbox"/>
+  <rect x="500" y="240" width="16" height="40" class="slbox"/>
+  <text class="text" x="520" y="222">BL = (A_max − A_pot)/A_max</text>
+  <text class="text" x="520" y="262">SL = (A_pot − A)/A_max</text>
+  <text class="text" x="520" y="302">TL = (A_max − A)/A_max</text>
+
+  <!-- Equations block -->
+  <text class="label" x="80" y="90">Farquhar‑type model</text>
+  <text class="text" x="80" y="112">Ac = Vcmax · (Ci − Γ*) / (Ci + Kc·(1 + O/Ko))</text>
+  <text class="text" x="80" y="132">Aj = J · (Ci − Γ*) / (4·Ci + 8·Γ*)</text>
+  <text class="text" x="80" y="152">A = min(Ac, Aj) − Rd</text>
+
+</svg>

@@ -30,22 +30,33 @@ def ensure_derived(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     S = _leaf_area_m2(d)
     F = _flow_umol_s(d)
-    if ("H2O_s" in d.columns and "H2O_a" in d.columns) and ("E" not in d.columns or _is_all_zero_or_nan(d["E"])):
-        w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_a"], errors="coerce")
+    if ("H2O_s" in d.columns and ("H2O_r" in d.columns or "H2O_a" in d.columns)) and ("E" not in d.columns or _is_all_zero_or_nan(d["E"])):
+        if "H2O_r" in d.columns:
+            w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_r"], errors="coerce")
+        else:
+            w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_a"], errors="coerce")
         Emmol = (F * w) * 1e-6 / max(S,1e-9)
         d["E"] = Emmol
     if ("CO2_r" in d.columns and "CO2_s" in d.columns) and ("A" not in d.columns or _is_all_zero_or_nan(d["A"])):
         cdiff = pd.to_numeric(d["CO2_r"], errors="coerce") - pd.to_numeric(d["CO2_s"], errors="coerce")
         A = (F * cdiff) / (1e6 * max(S,1e-9))
         d["A"] = A
-    if ("H2O_s" in d.columns and "H2O_a" in d.columns) and ("gtw" not in d.columns or _is_all_zero_or_nan(d["gtw"])):
+    if ("H2O_s" in d.columns and ("H2O_r" in d.columns or "H2O_a" in d.columns) and "H2O_a" in d.columns and "Tleaf" in d.columns and "Pa" in d.columns) and ("gtw" not in d.columns or _is_all_zero_or_nan(d["gtw"])):
         if "E" in d.columns and not _is_all_zero_or_nan(d["E"]):
             E = pd.to_numeric(d["E"], errors="coerce")
         else:
-            w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_a"], errors="coerce")
+            if "H2O_r" in d.columns:
+                w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_r"], errors="coerce")
+            else:
+                w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_a"], errors="coerce")
             E = (F * w) * 1e-6 / max(S,1e-9)
-        wgrad = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_a"], errors="coerce")
-        gtw = pd.Series(0.0, index=d.index)
+        T = pd.to_numeric(d["Tleaf"], errors="coerce")
+        P = pd.to_numeric(d["Pa"], errors="coerce")
+        es = 0.61121 * np.exp((18.678 - T/234.5) * (T/(257.14+T)))
+        wi = 1000.0 * es / P.replace(0,np.nan)
+        wa = pd.to_numeric(d["H2O_a"], errors="coerce")
+        wgrad = wi - wa
+        gtw = pd.Series(np.nan, index=d.index)
         mask = wgrad.abs()>1e-3
         gtw.loc[mask] = (E.loc[mask]) / (wgrad.loc[mask])
         d["gtw"] = gtw
@@ -63,4 +74,3 @@ def ensure_derived(df: pd.DataFrame) -> pd.DataFrame:
                 inv = 1.0/gtw.replace(0,np.nan) - 1.0/gbw_est
                 d["gsw"] = 1.0/inv
     return d
-

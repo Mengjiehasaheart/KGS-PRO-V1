@@ -305,58 +305,57 @@ if mode == "Batch Processing":
                     csv_agg = StringIO()
                     agg.to_csv(csv_agg, index=False)
                     st.download_button("Download aggregated CSV", data=csv_agg.getvalue(), file_name="batch_aggregated.csv", mime="text/csv")
-            st.markdown("---")
-            st.subheader("Per-file plots")
-            file_opts = sorted(merged_cached["file_id"].unique().tolist()) if "file_id" in merged_cached.columns else []
-            default_vars = []
-            if "A" in merged_cached.columns:
-                default_vars.append("A")
-            if "gsw" in merged_cached.columns:
-                default_vars.append("gsw")
-            plot_vars = st.multiselect("Variables", options=[c for c in numeric_cols if c not in ["file_id"]], default=default_vars[:2], key="per_file_vars")
-            files_pick = st.multiselect("Files", options=file_opts, default=file_opts[:1], key="per_file_files")
-            def make_per_file_fig(df, fid, vars_sel):
-                import plotly.graph_objects as go
-                sub = df[df["file_id"]==fid].copy()
-                sub = ensure_time_min(sub)
-                sub = ensure_wue(sub)
-                fig = go.Figure()
-                for v in vars_sel:
-                    if v not in sub.columns:
+        st.markdown("---")
+        st.subheader("Per-file plots")
+        file_opts = sorted(merged_cached["file_id"].unique().tolist()) if "file_id" in merged_cached.columns else []
+        default_vars = []
+        if "A" in merged_cached.columns:
+            default_vars.append("A")
+        if "gsw" in merged_cached.columns:
+            default_vars.append("gsw")
+        plot_vars = st.multiselect("Variables", options=[c for c in numeric_cols if c not in ["file_id"]], default=default_vars[:2], key="per_file_vars")
+        files_pick = st.multiselect("Files", options=file_opts, default=file_opts[:1], key="per_file_files")
+        def make_per_file_fig(df, fid, vars_sel):
+            import plotly.graph_objects as go
+            sub = df[df["file_id"]==fid].copy()
+            sub = ensure_time_min(sub)
+            sub = ensure_wue(sub)
+            fig = go.Figure()
+            for v in vars_sel:
+                if v not in sub.columns:
+                    continue
+                fig.add_trace(go.Scatter(x=sub["time_min"], y=pd.to_numeric(sub[v], errors="coerce"), mode="lines", name=f"{fid} - {v}"))
+            lab_map = {
+                "A":"A (µmol m⁻² s⁻¹)",
+                "gsw":"gsw (mol m⁻² s⁻¹)",
+                "Ci":"Ci (µmol mol⁻¹)",
+                "Rabs":"Rabs (µmol m⁻² s⁻¹)",
+                "WUE":"WUE (µmol CO₂ mol⁻¹ H₂O)"
+            }
+            ylab = ", ".join([lab_map.get(v,v) for v in vars_sel]) if vars_sel else ""
+            fig = format_fig(fig, "Time (min)", ylab)
+            return fig
+        perfile_figs = []
+        if files_pick and plot_vars:
+            for fid in files_pick:
+                fig_pf = make_per_file_fig(merged_cached, fid, plot_vars)
+                st.plotly_chart(fig_pf, use_container_width=True)
+                perfile_figs.append((fid, fig_pf))
+        if perfile_figs:
+            import zipfile
+            zip_buf = BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for fid, fig_pf in perfile_figs:
+                    try:
+                        png_bytes = fig_pf.to_image(format="png", scale=3)
+                        zf.writestr(f"{fid}.png", png_bytes)
+                    except Exception:
                         continue
-                    fig.add_trace(go.Scatter(x=sub["time_min"], y=pd.to_numeric(sub[v], errors="coerce"), mode="lines", name=f"{fid} - {v}"))
-                lab_map = {
-                    "A":"A (µmol m⁻² s⁻¹)",
-                    "gsw":"gsw (mol m⁻² s⁻¹)",
-                    "Ci":"Ci (µmol mol⁻¹)",
-                    "Rabs":"Rabs (µmol m⁻² s⁻¹)",
-                    "WUE":"WUE (µmol CO₂ mol⁻¹ H₂O)"
-                }
-                ylab = ", ".join([lab_map.get(v,v) for v in vars_sel]) if vars_sel else ""
-                fig = format_fig(fig, "Time (min)", ylab)
-                return fig
-            perfile_figs = []
-            if files_pick and plot_vars:
-                for fid in files_pick:
-                    fig_pf = make_per_file_fig(merged_cached, fid, plot_vars)
-                    st.plotly_chart(fig_pf, use_container_width=True)
-                    perfile_figs.append((fid, fig_pf))
-            if perfile_figs:
-                import zipfile
-                zip_buf = BytesIO()
-                with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for fid, fig_pf in perfile_figs:
-                        try:
-                            png_bytes = fig_pf.to_image(format="png", scale=3)
-                            zf.writestr(f"{fid}.png", png_bytes)
-                        except Exception:
-                            continue
-                zip_buf.seek(0)
-                st.download_button("Download plotted files (PNG, 300 dpi approx)", data=zip_buf.getvalue(), file_name="batch_plots.zip", mime="application/zip")
-    st.stop()
+            zip_buf.seek(0)
+            st.download_button("Download plotted files (PNG, 300 dpi approx)", data=zip_buf.getvalue(), file_name="batch_plots.zip", mime="application/zip")
     else:
         st.info("Add files and start batch processing")
-        st.stop()
+    st.stop()
 
 with st.sidebar:
     st.header("Data")

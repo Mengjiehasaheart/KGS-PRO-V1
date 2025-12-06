@@ -2,7 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import json
+import multiprocessing
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
+from io import StringIO, BytesIO
+from pathlib import Path
 from kgs_pro.io import read_any, read_pasted_table, standardize_columns, choose_light_column
 from kgs_pro.preprocess import infer_time, rolling_smooth
 from kgs_pro.calc import ensure_derived
@@ -11,16 +16,246 @@ from kgs_pro.models import fit_step_increase, fit_step_decrease
 from kgs_pro.plotting import make_timeseries, overlay_fit
 from kgs_pro.metrics import percent_times, deficit, sl_approx
 from kgs_pro.partition import calibrate_params, partition_limits
-from pathlib import Path
-from io import StringIO
+from kgs_pro.pipeline import process_source, process_bytes_job
 
-st.set_page_config(page_title="KGS-PRO V1", layout="wide")
+st.set_page_config(page_title="KGS-PRO V2", layout="wide")
 
-st.title("KGS-PRO V1: Dynamic Photosynthesis Analysis")
+st.title("KGS-PRO V2: Dynamic Photosynthesis Analysis")
 st.markdown("<div style='text-align: right; font-size: 12px; font-weight: bold; color: #333;'>© Mengjie Fan</div>", unsafe_allow_html=True)
+
+def split_groups(name: str, delim: str, count: int):
+    if count <= 0:
+        return []
+    parts = name.split(delim) if delim else [name]
+    if len(parts) < count:
+        parts = parts + [""]*(count - len(parts))
+    else:
+        parts = parts[:count]
+    return parts
+
+def build_group_names(raw_names: str, count: int):
+    names = [n.strip() for n in raw_names.split(",") if n.strip()]
+    out = []
+    for i in range(count):
+        out.append(names[i] if i < len(names) else f"group_{i+1}")
+    return out
+
+def merge_results(successes, delim, group_count, group_names):
+    if not successes:
+        return None
+    merged_frames = []
+    seen = {}
+    for res in successes:
+        if res.df is None:
+            continue
+        df = res.df.copy()
+        df.columns = pd.Index([str(c) for c in df.columns], dtype=object)
+        df = df.loc[:, ~df.columns.duplicated()]
+        base = Path(res.filename).stem
+        seen[base] = seen.get(base, 0) + 1
+        file_id = base if seen[base] == 1 else f"{base}_{seen[base]}"
+        df.insert(0, "file_id", file_id)
+        groups = split_groups(base, delim, group_count)
+        for idx, val in enumerate(groups):
+            col_name = group_names[idx] if idx < len(group_names) else f"group_{idx+1}"
+            df.insert(1 + idx, col_name, val)
+        merged_frames.append(df)
+    if not merged_frames:
+        return None
+    merged = pd.concat(merged_frames, ignore_index=True, sort=False)
+    merged.columns = pd.Index([str(c) for c in merged.columns], dtype=object)
+    merged = merged.loc[:, ~merged.columns.duplicated()]
+    return merged
+
+def build_excel_buffer(df: pd.DataFrame) -> BytesIO:
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    buf.seek(0)
+    return buf
+
+def aggregate_timeseries(df: pd.DataFrame, value: str, group_cols, time_col: str="time_min"):
+    cols_need = [c for c in group_cols if c in df.columns]
+    cols = [time_col, value] + cols_need
+    data = df[cols].copy()
+    data[value] = pd.to_numeric(data[value], errors="coerce")
+    data = data.dropna(subset=[value, time_col])
+    grp_keys = cols_need + [time_col] if cols_need else [time_col]
+    agg = data.groupby(grp_keys)[value].agg(["mean","count","std"]).reset_index()
+    agg["sem"] = agg["std"]/np.sqrt(agg["count"].replace(0,np.nan))
+    return agg
+
+def plot_aggregated(agg: pd.DataFrame, value: str, group_cols, time_col: str="time_min"):
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    if group_cols:
+        uniq = agg[group_cols].drop_duplicates()
+        for _, row in uniq.iterrows():
+            mask = (agg[group_cols] == row.values).all(axis=1)
+            sub = agg.loc[mask].sort_values(time_col)
+            name = " / ".join([str(row[g]) for g in group_cols])
+            fig.add_trace(go.Scatter(x=sub[time_col], y=sub["mean"], mode="lines", name=name))
+            if "sem" in sub:
+                fig.add_trace(go.Scatter(x=pd.concat([sub[time_col], sub[time_col][::-1]]), y=pd.concat([sub["mean"]-sub["sem"], (sub["mean"]+sub["sem"])[::-1]]), fill="toself", mode="lines", line=dict(color="rgba(0,0,0,0)"), showlegend=False, opacity=0.2, name=None))
+    else:
+        sub = agg.sort_values(time_col)
+        fig.add_trace(go.Scatter(x=sub[time_col], y=sub["mean"], mode="lines", name=value))
+        if "sem" in sub:
+            fig.add_trace(go.Scatter(x=pd.concat([sub[time_col], sub[time_col][::-1]]), y=pd.concat([sub["mean"]-sub["sem"], (sub["mean"]+sub["sem"])[::-1]]), fill="toself", mode="lines", line=dict(color="rgba(0,0,0,0)"), showlegend=False, opacity=0.2, name=None))
+    fig.update_layout(xaxis_title="time_min", yaxis_title=value)
+    return fig
+
+mode = st.sidebar.radio("Mode", ["Single Analysis", "Batch Processing"], index=0)
+
+if mode == "Batch Processing":
+    with st.sidebar:
+        st.header("Batch")
+        calc_batch = st.radio("Calculator", ["MF Calculator", "XL Calculator"], index=0, key="calc_batch")
+        calc_engine_batch = "mf" if calc_batch == "MF Calculator" else "xlcalculator"
+        uploads = st.file_uploader("Files", type=["csv", "txt", "xlsx", "xls"], accept_multiple_files=True, key="batch_uploads")
+        use_sample = st.checkbox("Include sample raw files", value=False, key="batch_use_sample")
+        smooth_batch = st.checkbox("Smooth", value=True, key="batch_smooth")
+        win_batch = st.slider("Window", 1, 21, 5, 2, key="batch_win")
+        st.header("Time base")
+        manual_dt_batch = st.checkbox("Set sampling interval (s)", key="batch_manual_dt")
+        dt_batch = st.number_input("Interval (s)", min_value=0.1, value=1.0, step=0.1, key="batch_dt") if manual_dt_batch else None
+        cores_max = max(1, multiprocessing.cpu_count())
+        cores_default = min(4, cores_max)
+        cores_batch = st.slider("CPU cores", 1, cores_max, cores_default, 1, key="batch_cores")
+        st.header("Grouping")
+        delim = st.text_input("Filename delimiter", value="-", key="batch_delim")
+        group_count = st.number_input("Grouping parts", min_value=0, max_value=20, value=0, step=1, key="batch_group_count")
+        group_names_raw = st.text_input("Group names (comma-separated)", value="", key="batch_group_names")
+    st.subheader("Batch Processing")
+    st.caption("Upload or load sample files, select calculator, and process up to 1000 files with parallel workers.")
+    process_btn = st.button("Process batch", key="batch_process")
+    if process_btn:
+        files = []
+        if uploads:
+            for f in uploads:
+                files.append((f.getvalue(), f.name))
+        if use_sample:
+            sample_dir = Path("Sample_Dataset/Raw_licor_files")
+            if sample_dir.exists():
+                for p in sorted(sample_dir.glob("*")):
+                    if p.is_file():
+                        files.append((p.read_bytes(), p.name))
+        total = len(files)
+        if total == 0:
+            st.warning("No files to process")
+            st.stop()
+        if total > 1000:
+            files = files[:1000]
+            total = len(files)
+            st.warning("Processing capped at 1000 files per batch")
+        group_names = build_group_names(group_names_raw, int(group_count))
+        st.write({"queued_files": total, "calculator": calc_batch, "cores": int(cores_batch)})
+        successes = []
+        errors = []
+        summary_rows = []
+        start_time = time.time()
+        progress = st.progress(0.0)
+        with st.status("Processing batch...", expanded=True) as status:
+            status_text = st.empty()
+            if int(cores_batch) == 1:
+                for idx, (data, name) in enumerate(files, start=1):
+                    res = process_source(data, name, calc_engine_batch, dt_batch, smooth_batch, win_batch, None, True, True)
+                    if res.error or res.df is None:
+                        errors.append({"file": name, "error": res.error if res.error else "Unknown failure"})
+                    else:
+                        successes.append(res)
+                        summary_rows.append({
+                            "file": name,
+                            "rows": len(res.df),
+                            "columns": len(res.df.columns),
+                            "time_col": res.time_col,
+                            "light_col": res.light_col,
+                            "step_up": res.steps.get("up"),
+                            "step_down": res.steps.get("down")
+                        })
+                    elapsed = time.time() - start_time
+                    rate = idx/elapsed if elapsed > 0 else 0.0
+                    remaining = (total - idx)/rate if rate > 0 else None
+                    progress.progress(idx/total)
+                    status_text.write(f"{idx}/{total} files processed ({rate:.2f}/s" + (f", eta {remaining:.1f}s" if remaining else "") + f") latest: {name}")
+            else:
+                with ThreadPoolExecutor(max_workers=int(cores_batch)) as ex:
+                    futures = {ex.submit(process_bytes_job, (data, name, calc_engine_batch, dt_batch, smooth_batch, win_batch)): name for data, name in files}
+                    for idx, fut in enumerate(as_completed(futures), start=1):
+                        try:
+                            res = fut.result()
+                        except Exception as e:
+                            name = futures[fut]
+                            errors.append({"file": name, "error": str(e)})
+                            res = None
+                        if res is not None:
+                            name = res.filename
+                            if res.error or res.df is None:
+                                errors.append({"file": name, "error": res.error if res.error else "Unknown failure"})
+                            else:
+                                successes.append(res)
+                                summary_rows.append({
+                                    "file": name,
+                                    "rows": len(res.df),
+                                    "columns": len(res.df.columns),
+                                    "time_col": res.time_col,
+                                    "light_col": res.light_col,
+                                    "step_up": res.steps.get("up"),
+                                    "step_down": res.steps.get("down")
+                                })
+                        elapsed = time.time() - start_time
+                        rate = idx/elapsed if elapsed > 0 else 0.0
+                        remaining = (total - idx)/rate if rate > 0 else None
+                        progress.progress(idx/total)
+                        latest_name = name if res is not None else futures[fut]
+                        status_text.write(f"{idx}/{total} files processed ({rate:.2f}/s" + (f", eta {remaining:.1f}s" if remaining else "") + f") latest: {latest_name}")
+            status.update(label="Processing complete", state="complete")
+        st.success(f"Finished {len(successes)} files, {len(errors)} errors")
+        if summary_rows:
+            st.write(pd.DataFrame(summary_rows))
+        if errors:
+            st.error("Files with issues")
+            st.write(pd.DataFrame(errors))
+        merged = merge_results(successes, delim, int(group_count), group_names)
+        if merged is not None:
+            st.subheader("Merged dataset")
+            st.write({"rows": len(merged), "columns": len(merged.columns)})
+            st.dataframe(merged.head())
+            csv_buf = StringIO()
+            merged.to_csv(csv_buf, index=False)
+            st.download_button("Download merged CSV", data=csv_buf.getvalue(), file_name="merged_processed.csv", mime="text/csv")
+            xlsx_buf = build_excel_buffer(merged)
+            st.download_button("Download merged XLSX", data=xlsx_buf.getvalue(), file_name="merged_processed.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.subheader("Batch analysis (optional)")
+            do_batch_plot = st.checkbox("Enable batch plots", value=False, key="batch_plot_toggle")
+            if do_batch_plot:
+                time_col_batch = "time_min" if "time_min" in merged.columns else None
+                if time_col_batch is None:
+                    st.warning("time_min not found; cannot plot batch averages")
+                else:
+                    numeric_cols = [c for c in merged.columns if merged[c].dtype!=object and c not in ["file_id"]]
+                    value_col = st.selectbox("Value", options=numeric_cols, index=0 if len(numeric_cols)>0 else None)
+                    group_opts = [c for c in merged.columns if c.startswith("group_")] + ["file_id"]
+                    group_sel = st.multiselect("Group by", options=group_opts, default=[c for c in group_opts if c.startswith("group_")])
+                    if value_col:
+                        agg = aggregate_timeseries(merged, value_col, group_sel, time_col=time_col_batch)
+                        if len(agg)==0:
+                            st.warning("No data to plot for selected value")
+                        else:
+                            fig_batch = plot_aggregated(agg, value_col, group_sel, time_col=time_col_batch)
+                            st.plotly_chart(fig_batch, use_container_width=True)
+                            csv_agg = StringIO()
+                            agg.to_csv(csv_agg, index=False)
+                            st.download_button("Download aggregated CSV", data=csv_agg.getvalue(), file_name="batch_aggregated.csv", mime="text/csv")
+        st.stop()
+    else:
+        st.info("Add files and start batch processing")
+        st.stop()
 
 with st.sidebar:
     st.header("Data")
+    calc_single = st.radio("Calculator", ["MF Calculator", "XL Calculator"], index=0, key="calc_single")
+    calc_engine_single = "mf" if calc_single == "MF Calculator" else "xlcalculator"
     src = st.radio("Input", ["Upload","Paste","Sample"], index=0)
     uploaded = None
     pasted = None
@@ -42,11 +277,11 @@ with st.sidebar:
 
 def load_df():
     if src=="Upload" and uploaded is not None:
-        return read_any(uploaded, uploaded.name)
+        return read_any(uploaded, uploaded.name, calc_engine=calc_engine_single)
     if src=="Paste" and pasted:
         return read_pasted_table(pasted)
     if src=="Sample" and sample_path.exists():
-        return read_any(str(sample_path))
+        return read_any(str(sample_path), calc_engine=calc_engine_single)
     return None
 
 df = load_df()
@@ -72,8 +307,6 @@ with st.sidebar:
         light_opts = [c for c in ["Qin","Q","PARi","PPFD","par","Light","Rabs"] if c in df.columns]
         light_choice = st.selectbox("Light column", options=light_opts) if light_opts else None
 q_col = choose_light_column(df) if light_auto else light_choice
-
-## placeholder; experiment metrics will render after step detection below
 
 st.subheader("Model Fitting")
 

@@ -1,0 +1,16 @@
+include *.rst
+include *.txt
+include *.py
+include *.yml
+include *.in
+include .coveragerc
+include tox.ini
+include LICENSE
+
+recursive-include examples *
+recursive-include tests *
+recursive-include xlcalculator *
+
+recursive-exclude docs/_build *
+
+global-exclude *.pyc

@@ -30,6 +30,11 @@ def ensure_derived(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     S = _leaf_area_m2(d)
     F = _flow_umol_s(d)
+    if "Ca" not in d.columns or _is_all_zero_or_nan(d["Ca"]):
+        if "CO2_r" in d.columns:
+            d["Ca"] = pd.to_numeric(d["CO2_r"], errors="coerce")
+        elif "CO2_a" in d.columns:
+            d["Ca"] = pd.to_numeric(d["CO2_a"], errors="coerce")
     if ("H2O_s" in d.columns and ("H2O_r" in d.columns or "H2O_a" in d.columns)) and ("E" not in d.columns or _is_all_zero_or_nan(d["E"])):
         if "H2O_r" in d.columns:
             w = pd.to_numeric(d["H2O_s"], errors="coerce") - pd.to_numeric(d["H2O_r"], errors="coerce")
@@ -73,4 +78,38 @@ def ensure_derived(df: pd.DataFrame) -> pd.DataFrame:
                 gbw_est = _estimate_gbw(F)
                 inv = 1.0/gtw.replace(0,np.nan) - 1.0/gbw_est
                 d["gsw"] = 1.0/inv
+    if "gsc" not in d.columns and "gsw" in d.columns:
+        d["gsc"] = pd.to_numeric(d["gsw"], errors="coerce")/1.6
+    if "gbw" not in d.columns:
+        d["gbw"] = _estimate_gbw(F)
+    if "gbc" not in d.columns and "gbw" in d.columns:
+        d["gbc"] = pd.to_numeric(d["gbw"], errors="coerce")/1.37
+    if "gtc" not in d.columns and "gsc" in d.columns and "gbc" in d.columns:
+        gsc = pd.to_numeric(d["gsc"], errors="coerce")
+        gbc = pd.to_numeric(d["gbc"], errors="coerce")
+        inv = 1.0/gsc.replace(0,np.nan) + 1.0/gbc.replace(0,np.nan)
+        gtc = 1.0/inv
+        gtc = gtc.where(gtc != 0)
+        d["gtc"] = gtc
+    if "Ci" not in d.columns or _is_all_zero_or_nan(d["Ci"]):
+        if "Ca" in d.columns and "A" in d.columns:
+            Ca = pd.to_numeric(d["Ca"], errors="coerce")
+            A = pd.to_numeric(d["A"], errors="coerce")
+            if "gtc" in d.columns and not _is_all_zero_or_nan(d["gtc"]):
+                gtc = pd.to_numeric(d["gtc"], errors="coerce")
+                Ci = pd.Series(np.nan, index=d.index)
+                mask = gtc.replace(0,np.nan).notna()
+                Ci.loc[mask] = Ca.loc[mask] - A.loc[mask]/gtc.loc[mask]
+                d["Ci"] = Ci
+            else:
+                Ci = Ca * 0.7
+                d["Ci"] = Ci
+    if "Pca" not in d.columns and "Ca" in d.columns:
+        if "Pa" in d.columns:
+            d["Pca"] = pd.to_numeric(d["Ca"], errors="coerce") * pd.to_numeric(d["Pa"], errors="coerce")/1000.0
+    if "Pci" not in d.columns and "Ci" in d.columns:
+        if "Pa" in d.columns:
+            d["Pci"] = pd.to_numeric(d["Ci"], errors="coerce") * pd.to_numeric(d["Pa"], errors="coerce")/1000.0
+    if "Rabs" not in d.columns and "Qin" in d.columns:
+        d["Rabs"] = pd.to_numeric(d["Qin"], errors="coerce")
     return d

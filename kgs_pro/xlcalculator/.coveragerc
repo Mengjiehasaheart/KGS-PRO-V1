@@ -1,0 +1,9 @@
+[run]
+source =
+    ../xlcalculator
+    */site-packages/xlcalculator
+relative_files = True
+
+[report]
+show_missing = true
+precision = 2

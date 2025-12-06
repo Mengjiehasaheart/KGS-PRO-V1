@@ -1,0 +1,8 @@
+*.egg-info
+dist
+build
+__pycache__
+ve
+.coverage
+.tox
+coverage.xml

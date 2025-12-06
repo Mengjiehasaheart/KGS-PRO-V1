@@ -1,7 +1,10 @@
+import os
 import pandas as pd
 import numpy as np
 from io import StringIO, BytesIO
 from typing import Optional, Tuple, Dict
+from tempfile import NamedTemporaryFile
+from openpyxl.utils import get_column_letter
 
 def _try_read_csv(text: str) -> pd.DataFrame:
     try:
@@ -70,10 +73,110 @@ def _read_licor_excel_smart_bytes(data: BytesIO) -> pd.DataFrame:
     data_df = data_df.dropna(how="all").reset_index(drop=True)
     return data_df
 
-def read_any(path_or_buffer, filename: Optional[str]=None) -> pd.DataFrame:
+def _read_excel_with_xlcalculator_path(path: str) -> pd.DataFrame:
+    fast = _read_licor_excel_smart_path(path)
+    cols_fast = [str(c).strip() for c in fast.columns]
+    base_ok = "CO2_r" in cols_fast and "CO2_s" in cols_fast
+    h2o_ok = "H2O_s" in cols_fast and ("H2O_r" in cols_fast or "H2O_a" in cols_fast)
+    if base_ok and h2o_ok:
+        return fast
+    from kgs_pro.xlcalculator.xlcalculator import ModelCompiler, Evaluator
+    compiler = ModelCompiler()
+    model = compiler.read_and_parse_archive(path, build_code=True)
+    evaluator = Evaluator(model)
+    try:
+        xls = pd.ExcelFile(path, engine="openpyxl")
+        sheet_name = "Measurements" if "Measurements" in xls.sheet_names else xls.sheet_names[0]
+        raw = xls.parse(sheet_name=sheet_name, header=None)
+    except Exception:
+        raw = pd.read_excel(path, sheet_name=0, header=None, engine="openpyxl")
+        sheet_name = None
+    if sheet_name is None:
+        try:
+            sheet_name = pd.ExcelFile(path, engine="openpyxl").sheet_names[0]
+        except Exception:
+            sheet_name = "Sheet1"
+    hdr = None
+    for i in range(min(len(raw), 120)):
+        vals = [str(v).strip().lower() for v in raw.iloc[i].tolist()]
+        if any(v in ("obs","hhmmss","qin","a","gsw") for v in vals):
+            hdr = i
+            break
+    if hdr is None:
+        return _read_licor_excel_smart_path(path)
+    cols = [str(c).strip() for c in raw.iloc[hdr].tolist()]
+    start = hdr + 2 if hdr + 2 < len(raw) else hdr + 1
+    data_df = raw.iloc[start:].copy()
+    data_df.columns = cols
+    data_df = data_df.reset_index(drop=True)
+    sheet = sheet_name
+    target_eval = set(["A","E","gsw","gtw","Ci","Ca","gbw","gbc","gsc","gtc","VPDleaf","RHcham","Pca","Pci"])
+    def has_all(names):
+        return all(n in data_df.columns for n in names)
+    skip_if_base = {
+        "A": ["CO2_r","CO2_s"],
+        "E": ["H2O_s","H2O_r"],
+        "gsw": ["gtw"],
+        "gtw": ["H2O_s","H2O_r","H2O_a","Tleaf","Pa"],
+        "Ca": ["CO2_r"],
+        "Ci": ["Ca","A"],
+        "gbw": ["Flow"],
+        "gsc": ["gsw"],
+        "gtc": ["gsc","gbc"],
+        "gbc": ["gbw"],
+    }
+    eval_cols = set()
+    for c in target_eval:
+        if c not in data_df.columns:
+            continue
+        col_vals = pd.to_numeric(data_df[c], errors="coerce")
+        if col_vals.notna().any():
+            continue
+        base_need = skip_if_base.get(c, [])
+        if base_need and has_all(base_need):
+            continue
+        eval_cols.add(c)
+    for r_idx in range(len(data_df)):
+        excel_row = start + r_idx + 1
+        for c_idx, c in enumerate(cols):
+            if c not in eval_cols:
+                continue
+            cur = data_df.iloc[r_idx, c_idx]
+            needs_eval = isinstance(cur, str) and cur.strip().startswith("=")
+            if not needs_eval:
+                continue
+            addr = f"{sheet}!{get_column_letter(c_idx+1)}{excel_row}"
+            try:
+                val = evaluator.evaluate(addr)
+                data_df.iat[r_idx, c_idx] = val
+            except Exception:
+                pass
+    data_df = data_df.dropna(how="all").reset_index(drop=True)
+    data_df.columns = [str(c).strip() for c in data_df.columns]
+    return data_df
+
+def _read_excel_with_xlcalculator_bytes(data: BytesIO) -> pd.DataFrame:
+    tmp = NamedTemporaryFile(delete=False, suffix=".xlsx")
+    tmp.write(data.getvalue())
+    tmp.flush()
+    tmp.close()
+    try:
+        return _read_excel_with_xlcalculator_path(tmp.name)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+def read_any(path_or_buffer, filename: Optional[str]=None, calc_engine: str="mf") -> pd.DataFrame:
     if isinstance(path_or_buffer, (str,)):
         p = str(path_or_buffer).lower()
         if p.endswith((".xlsx",".xls")):
+            if calc_engine == "xlcalculator":
+                try:
+                    return _read_excel_with_xlcalculator_path(path_or_buffer)
+                except Exception:
+                    pass
             return _read_licor_excel_smart_path(path_or_buffer)
         else:
             try:
@@ -87,6 +190,15 @@ def read_any(path_or_buffer, filename: Optional[str]=None) -> pd.DataFrame:
         if filename:
             f = filename.lower()
             if f.endswith((".xlsx",".xls")):
+                if calc_engine == "xlcalculator":
+                    try:
+                        if isinstance(path_or_buffer, BytesIO):
+                            return _read_excel_with_xlcalculator_bytes(path_or_buffer)
+                        else:
+                            return _read_excel_with_xlcalculator_bytes(BytesIO(path_or_buffer.getvalue()))
+                    except Exception:
+                        path_or_buffer.seek(0)
+                        return _read_licor_excel_smart_bytes(path_or_buffer)
                 return _read_licor_excel_smart_bytes(path_or_buffer)
         try:
             return _read_csv_bytes(path_or_buffer)

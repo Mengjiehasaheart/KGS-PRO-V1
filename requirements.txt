@@ -7,3 +7,4 @@ openpyxl>=3.1
 jsonpickle>=3.0
 numpy-financial>=1.0
 yearfrac>=0.4
+kaleido>=0.2.1

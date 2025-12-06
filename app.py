@@ -74,6 +74,42 @@ def build_excel_buffer(df: pd.DataFrame) -> BytesIO:
     buf.seek(0)
     return buf
 
+def ensure_time_min(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    if "time_min" in d.columns:
+        return d
+    if "elapsed" in d.columns:
+        d["time_min"] = pd.to_numeric(d["elapsed"], errors="coerce")/60.0
+    elif "elapsed_s" in d.columns:
+        d["time_min"] = pd.to_numeric(d["elapsed_s"], errors="coerce")/60.0
+    elif "time_s" in d.columns:
+        d["time_min"] = pd.to_numeric(d["time_s"], errors="coerce")/60.0
+    return d
+
+def ensure_wue(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    if "WUE" not in d.columns and all(c in d.columns for c in ["A","gsw"]):
+        A = pd.to_numeric(d["A"], errors="coerce")
+        g = pd.to_numeric(d["gsw"], errors="coerce")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = A/g
+            w = w.replace([np.inf, -np.inf], np.nan)
+            d["WUE"] = w
+    return d
+
+def format_fig(fig, xlab, ylab):
+    fig.update_layout(
+        xaxis_title=xlab,
+        yaxis_title=ylab,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(size=13, color="#111", family="Arial"),
+        legend_title=None,
+    )
+    fig.update_xaxes(showgrid=False, showline=True, linewidth=2, linecolor="#111", mirror=True, title_font=dict(size=14, color="#111"))
+    fig.update_yaxes(showgrid=False, showline=True, linewidth=2, linecolor="#111", mirror=True, title_font=dict(size=14, color="#111"))
+    return fig
+
 def aggregate_timeseries(df: pd.DataFrame, value: str, group_cols, time_col: str="time_min"):
     cols_need = [c for c in group_cols if c in df.columns]
     cols = [time_col, value] + cols_need
@@ -91,23 +127,28 @@ def plot_aggregated(agg: pd.DataFrame, value: str, group_cols, time_col: str="ti
     if group_cols:
         uniq = agg[group_cols].drop_duplicates()
         for _, row in uniq.iterrows():
-            mask = (agg[group_cols] == row.values).all(axis=1)
+            mask = pd.Series(True, index=agg.index)
+            for g in group_cols:
+                mask &= agg[g] == row[g]
             sub = agg.loc[mask].sort_values(time_col)
             name = " / ".join([str(row[g]) for g in group_cols])
             fig.add_trace(go.Scatter(x=sub[time_col], y=sub["mean"], mode="lines", name=name))
             if "sem" in sub:
-                fig.add_trace(go.Scatter(x=pd.concat([sub[time_col], sub[time_col][::-1]]), y=pd.concat([sub["mean"]-sub["sem"], (sub["mean"]+sub["sem"])[::-1]]), fill="toself", mode="lines", line=dict(color="rgba(0,0,0,0)"), showlegend=False, opacity=0.2, name=None))
+                fig.add_trace(go.Scatter(x=pd.concat([sub[time_col], sub[time_col][::-1]]), y=pd.concat([sub["mean"]-sub["sem"], (sub["mean"]+sub["sem"])[::-1]]), fill="toself", mode="lines", line=dict(color="rgba(0,0,0,0)"), showlegend=False, opacity=0.12, name=None))
     else:
         sub = agg.sort_values(time_col)
         fig.add_trace(go.Scatter(x=sub[time_col], y=sub["mean"], mode="lines", name=value))
         if "sem" in sub:
-            fig.add_trace(go.Scatter(x=pd.concat([sub[time_col], sub[time_col][::-1]]), y=pd.concat([sub["mean"]-sub["sem"], (sub["mean"]+sub["sem"])[::-1]]), fill="toself", mode="lines", line=dict(color="rgba(0,0,0,0)"), showlegend=False, opacity=0.2, name=None))
-    fig.update_layout(xaxis_title="time_min", yaxis_title=value)
+            fig.add_trace(go.Scatter(x=pd.concat([sub[time_col], sub[time_col][::-1]]), y=pd.concat([sub["mean"]-sub["sem"], (sub["mean"]+sub["sem"])[::-1]]), fill="toself", mode="lines", line=dict(color="rgba(0,0,0,0)"), showlegend=False, opacity=0.12, name=None))
+    fig = format_fig(fig, "Time (min)", value)
     return fig
 
 mode = st.sidebar.radio("Mode", ["Single Analysis", "Batch Processing"], index=0)
 
 if mode == "Batch Processing":
+    merged_cached = st.session_state.get("batch_merged")
+    summary_cached = st.session_state.get("batch_summary")
+    errors_cached = st.session_state.get("batch_errors")
     with st.sidebar:
         st.header("Batch")
         calc_batch = st.radio("Calculator", ["MF Calculator", "XL Calculator"], index=0, key="calc_batch")
@@ -218,36 +259,101 @@ if mode == "Batch Processing":
             st.write(pd.DataFrame(errors))
         merged = merge_results(successes, delim, int(group_count), group_names)
         if merged is not None:
-            st.subheader("Merged dataset")
-            st.write({"rows": len(merged), "columns": len(merged.columns)})
-            st.dataframe(merged.head())
-            csv_buf = StringIO()
-            merged.to_csv(csv_buf, index=False)
-            st.download_button("Download merged CSV", data=csv_buf.getvalue(), file_name="merged_processed.csv", mime="text/csv")
-            xlsx_buf = build_excel_buffer(merged)
-            st.download_button("Download merged XLSX", data=xlsx_buf.getvalue(), file_name="merged_processed.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.subheader("Batch analysis (optional)")
-            do_batch_plot = st.checkbox("Enable batch plots", value=False, key="batch_plot_toggle")
-            if do_batch_plot:
-                time_col_batch = "time_min" if "time_min" in merged.columns else None
-                if time_col_batch is None:
-                    st.warning("time_min not found; cannot plot batch averages")
+            merged = ensure_time_min(merged)
+            merged = ensure_wue(merged)
+            st.session_state["batch_merged"] = merged
+            st.session_state["batch_summary"] = summary_rows
+            st.session_state["batch_errors"] = errors
+            merged_cached = merged
+            summary_cached = summary_rows
+            errors_cached = errors
+        st.success("Batch processing stored; see analysis below.")
+
+    if merged_cached is not None:
+        st.subheader("Merged dataset")
+        st.write({"rows": len(merged_cached), "columns": len(merged_cached.columns)})
+        st.dataframe(merged_cached.head())
+        csv_buf = StringIO()
+        merged_cached.to_csv(csv_buf, index=False)
+        st.download_button("Download merged CSV", data=csv_buf.getvalue(), file_name="merged_processed.csv", mime="text/csv")
+        xlsx_buf = build_excel_buffer(merged_cached)
+        st.download_button("Download merged XLSX", data=xlsx_buf.getvalue(), file_name="merged_processed.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.subheader("Batch analysis")
+        time_col_batch = "time_min" if "time_min" in merged_cached.columns else None
+        if time_col_batch is None:
+            st.warning("time_min not found; cannot plot batch averages")
+        else:
+            numeric_cols = [c for c in merged_cached.columns if merged_cached[c].dtype!=object and c not in ["file_id"]]
+            if "WUE" in merged_cached.columns and "WUE" not in numeric_cols:
+                numeric_cols.append("WUE")
+            if not numeric_cols:
+                st.warning("No numeric columns available for plotting")
+                value_col = None
+            else:
+                default_val = "A" if "A" in numeric_cols else numeric_cols[0]
+                value_col = st.selectbox("Value", options=numeric_cols, index=numeric_cols.index(default_val), key="batch_value")
+            group_opts = [c for c in merged_cached.columns if c.startswith("group_")] + ["file_id"]
+            group_sel = st.multiselect("Group by", options=group_opts, default=[c for c in group_opts if c.startswith("group_")], key="batch_group_sel")
+            if value_col:
+                agg = aggregate_timeseries(merged_cached, value_col, group_sel, time_col=time_col_batch)
+                if len(agg)==0:
+                    st.warning("No data to plot for selected value")
                 else:
-                    numeric_cols = [c for c in merged.columns if merged[c].dtype!=object and c not in ["file_id"]]
-                    value_col = st.selectbox("Value", options=numeric_cols, index=0 if len(numeric_cols)>0 else None)
-                    group_opts = [c for c in merged.columns if c.startswith("group_")] + ["file_id"]
-                    group_sel = st.multiselect("Group by", options=group_opts, default=[c for c in group_opts if c.startswith("group_")])
-                    if value_col:
-                        agg = aggregate_timeseries(merged, value_col, group_sel, time_col=time_col_batch)
-                        if len(agg)==0:
-                            st.warning("No data to plot for selected value")
-                        else:
-                            fig_batch = plot_aggregated(agg, value_col, group_sel, time_col=time_col_batch)
-                            st.plotly_chart(fig_batch, use_container_width=True)
-                            csv_agg = StringIO()
-                            agg.to_csv(csv_agg, index=False)
-                            st.download_button("Download aggregated CSV", data=csv_agg.getvalue(), file_name="batch_aggregated.csv", mime="text/csv")
-        st.stop()
+                    fig_batch = plot_aggregated(agg, value_col, group_sel, time_col=time_col_batch)
+                    fig_batch = format_fig(fig_batch, "Time (min)", value_col)
+                    st.plotly_chart(fig_batch, use_container_width=True)
+                    csv_agg = StringIO()
+                    agg.to_csv(csv_agg, index=False)
+                    st.download_button("Download aggregated CSV", data=csv_agg.getvalue(), file_name="batch_aggregated.csv", mime="text/csv")
+            st.markdown("---")
+            st.subheader("Per-file plots")
+            file_opts = sorted(merged_cached["file_id"].unique().tolist()) if "file_id" in merged_cached.columns else []
+            default_vars = []
+            if "A" in merged_cached.columns:
+                default_vars.append("A")
+            if "gsw" in merged_cached.columns:
+                default_vars.append("gsw")
+            plot_vars = st.multiselect("Variables", options=[c for c in numeric_cols if c not in ["file_id"]], default=default_vars[:2], key="per_file_vars")
+            files_pick = st.multiselect("Files", options=file_opts, default=file_opts[:1], key="per_file_files")
+            def make_per_file_fig(df, fid, vars_sel):
+                import plotly.graph_objects as go
+                sub = df[df["file_id"]==fid].copy()
+                sub = ensure_time_min(sub)
+                sub = ensure_wue(sub)
+                fig = go.Figure()
+                for v in vars_sel:
+                    if v not in sub.columns:
+                        continue
+                    fig.add_trace(go.Scatter(x=sub["time_min"], y=pd.to_numeric(sub[v], errors="coerce"), mode="lines", name=f"{fid} - {v}"))
+                lab_map = {
+                    "A":"A (µmol m⁻² s⁻¹)",
+                    "gsw":"gsw (mol m⁻² s⁻¹)",
+                    "Ci":"Ci (µmol mol⁻¹)",
+                    "Rabs":"Rabs (µmol m⁻² s⁻¹)",
+                    "WUE":"WUE (µmol CO₂ mol⁻¹ H₂O)"
+                }
+                ylab = ", ".join([lab_map.get(v,v) for v in vars_sel]) if vars_sel else ""
+                fig = format_fig(fig, "Time (min)", ylab)
+                return fig
+            perfile_figs = []
+            if files_pick and plot_vars:
+                for fid in files_pick:
+                    fig_pf = make_per_file_fig(merged_cached, fid, plot_vars)
+                    st.plotly_chart(fig_pf, use_container_width=True)
+                    perfile_figs.append((fid, fig_pf))
+            if perfile_figs:
+                import zipfile
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for fid, fig_pf in perfile_figs:
+                        try:
+                            png_bytes = fig_pf.to_image(format="png", scale=3)
+                            zf.writestr(f"{fid}.png", png_bytes)
+                        except Exception:
+                            continue
+                zip_buf.seek(0)
+                st.download_button("Download plotted files (PNG, 300 dpi approx)", data=zip_buf.getvalue(), file_name="batch_plots.zip", mime="application/zip")
+    st.stop()
     else:
         st.info("Add files and start batch processing")
         st.stop()

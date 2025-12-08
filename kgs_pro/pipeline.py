@@ -21,7 +21,6 @@ class ProcessResult:
 
 def prepare_dataframe(df: pd.DataFrame, dt_val: Optional[float], smooth: bool, win: int, light_choice: Optional[str], light_auto: bool, detect: bool) -> ProcessResult:
     d, colmap = standardize_columns(df)
-    d = ensure_derived(d)
     d, time_col = infer_time(d, dt_val)
     if smooth:
         for c in ["A", "gsw", "Ci", "Qin"]:
@@ -35,12 +34,14 @@ def prepare_dataframe(df: pd.DataFrame, dt_val: Optional[float], smooth: bool, w
     return ProcessResult(filename="", df=d, time_col=time_col, light_col=light_col, steps=steps, error=None, colmap=colmap)
 
 
-def process_source(source, filename: Optional[str], calc_engine: str, dt_val: Optional[float], smooth: bool, win: int, light_choice: Optional[str], light_auto: bool, detect: bool) -> ProcessResult:
+def process_source(source, filename: Optional[str], calc_engine: str, dt_val: Optional[float], smooth: bool, win: int, light_choice: Optional[str], light_auto: bool, detect: bool, apply_calc: bool=True) -> ProcessResult:
     try:
         buf = source
         if isinstance(source, (bytes, bytearray)):
             buf = BytesIO(source)
         df_raw = read_any(buf, filename, calc_engine=calc_engine)
+        if apply_calc:
+            df_raw = ensure_derived(df_raw)
         prepared = prepare_dataframe(df_raw, dt_val, smooth, win, light_choice, light_auto, detect)
         prepared.filename = filename if filename else ""
         return prepared
@@ -49,5 +50,5 @@ def process_source(source, filename: Optional[str], calc_engine: str, dt_val: Op
 
 
 def process_bytes_job(payload):
-    data_bytes, filename, calc_engine, dt_val, smooth, win = payload
-    return process_source(data_bytes, filename, calc_engine, dt_val, smooth, win, None, True, True)
+    data_bytes, filename, calc_engine, dt_val, smooth, win, apply_calc = payload
+    return process_source(data_bytes, filename, calc_engine, dt_val, smooth, win, None, True, True, apply_calc=apply_calc)

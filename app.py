@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from datetime import datetime
 from io import StringIO, BytesIO
 from pathlib import Path
+from plotly.subplots import make_subplots
 from kgs_pro.io import read_any, read_pasted_table, standardize_columns, choose_light_column
 from kgs_pro.preprocess import infer_time, rolling_smooth
 from kgs_pro.calc import ensure_derived
@@ -151,8 +152,9 @@ if mode == "Batch Processing":
     errors_cached = st.session_state.get("batch_errors")
     with st.sidebar:
         st.header("Batch")
-        calc_batch = st.radio("Calculator", ["MF Calculator", "XL Calculator"], index=0, key="calc_batch")
-        calc_engine_batch = "mf" if calc_batch == "MF Calculator" else "xlcalculator"
+        calc_batch = st.radio("Calculator", ["MF Calculator", "XL Calculator", "No Calculator"], index=0, key="calc_batch")
+        calc_engine_batch = "mf" if calc_batch == "MF Calculator" else ("xlcalculator" if calc_batch == "XL Calculator" else "none")
+        apply_calc_batch = calc_batch != "No Calculator"
         uploads = st.file_uploader("Files", type=["csv", "txt", "xlsx", "xls"], accept_multiple_files=True, key="batch_uploads")
         use_sample = st.checkbox("Include sample raw files", value=False, key="batch_use_sample")
         smooth_batch = st.checkbox("Smooth", value=True, key="batch_smooth")
@@ -200,7 +202,7 @@ if mode == "Batch Processing":
             status_text = st.empty()
             if int(cores_batch) == 1:
                 for idx, (data, name) in enumerate(files, start=1):
-                    res = process_source(data, name, calc_engine_batch, dt_batch, smooth_batch, win_batch, None, True, True)
+                    res = process_source(data, name, calc_engine_batch, dt_batch, smooth_batch, win_batch, None, True, True, apply_calc=apply_calc_batch)
                     if res.error or res.df is None:
                         errors.append({"file": name, "error": res.error if res.error else "Unknown failure"})
                     else:
@@ -221,7 +223,7 @@ if mode == "Batch Processing":
                     status_text.write(f"{idx}/{total} files processed ({rate:.2f}/s" + (f", eta {remaining:.1f}s" if remaining else "") + f") latest: {name}")
             else:
                 with ThreadPoolExecutor(max_workers=int(cores_batch)) as ex:
-                    futures = {ex.submit(process_bytes_job, (data, name, calc_engine_batch, dt_batch, smooth_batch, win_batch)): name for data, name in files}
+                    futures = {ex.submit(process_bytes_job, (data, name, calc_engine_batch, dt_batch, smooth_batch, win_batch, apply_calc_batch)): name for data, name in files}
                     for idx, fut in enumerate(as_completed(futures), start=1):
                         try:
                             res = fut.result()
@@ -320,11 +322,9 @@ if mode == "Batch Processing":
             sub = df[df["file_id"]==fid].copy()
             sub = ensure_time_min(sub)
             sub = ensure_wue(sub)
-            fig = go.Figure()
-            for v in vars_sel:
-                if v not in sub.columns:
-                    continue
-                fig.add_trace(go.Scatter(x=sub["time_min"], y=pd.to_numeric(sub[v], errors="coerce"), mode="lines", name=f"{fid} - {v}"))
+            use_secondary = "gsw" in vars_sel
+            fig = make_subplots(specs=[[{"secondary_y": use_secondary}]])
+            color_map = {"A":"#D25F19","gsw":"#0ABAB5","Ci":"#1f77b4","Rabs":"#444","WUE":"#6c3c97"}
             lab_map = {
                 "A":"A (µmol m⁻² s⁻¹)",
                 "gsw":"gsw (mol m⁻² s⁻¹)",
@@ -332,8 +332,31 @@ if mode == "Batch Processing":
                 "Rabs":"Rabs (µmol m⁻² s⁻¹)",
                 "WUE":"WUE (µmol CO₂ mol⁻¹ H₂O)"
             }
-            ylab = ", ".join([lab_map.get(v,v) for v in vars_sel]) if vars_sel else ""
-            fig = format_fig(fig, "Time (min)", ylab)
+            prim_titles = []
+            sec_title = None
+            for v in vars_sel:
+                if v not in sub.columns:
+                    continue
+                y = pd.to_numeric(sub[v], errors="coerce")
+                sec = use_secondary and v == "gsw"
+                fig.add_trace(
+                    go.Scatter(x=sub["time_min"], y=y, mode="lines", name=f"{fid} - {v}", line=dict(color=color_map.get(v,"#555"), width=2)),
+                    secondary_y=sec
+                )
+                if sec:
+                    sec_title = lab_map.get(v, v)
+                else:
+                    prim_titles.append(lab_map.get(v, v))
+            fig.update_layout(
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(size=13, color="#111", family="Arial"),
+                legend_title=None,
+            )
+            fig.update_xaxes(showgrid=False, showline=True, linewidth=2, linecolor="#111", mirror=True, title="Time (min)", title_font=dict(size=14, color="#111"))
+            fig.update_yaxes(showgrid=False, showline=True, linewidth=2, linecolor="#111", mirror=True, title=", ".join([t for t in prim_titles if t]), title_font=dict(size=14, color="#111"), secondary_y=False)
+            if use_secondary:
+                fig.update_yaxes(showgrid=False, showline=True, linewidth=2, linecolor="#0ABAB5", mirror=True, title=sec_title if sec_title else "", title_font=dict(size=14, color="#0ABAB5"), secondary_y=True)
             return fig
         perfile_figs = []
         if files_pick and plot_vars:
@@ -359,8 +382,9 @@ if mode == "Batch Processing":
 
 with st.sidebar:
     st.header("Data")
-    calc_single = st.radio("Calculator", ["MF Calculator", "XL Calculator"], index=0, key="calc_single")
-    calc_engine_single = "mf" if calc_single == "MF Calculator" else "xlcalculator"
+    calc_single = st.radio("Calculator", ["MF Calculator", "XL Calculator", "No Calculator"], index=0, key="calc_single")
+    calc_engine_single = "mf" if calc_single == "MF Calculator" else ("xlcalculator" if calc_single == "XL Calculator" else "none")
+    apply_calc_single = calc_single != "No Calculator"
     src = st.radio("Input", ["Upload","Paste","Sample"], index=0)
     uploaded = None
     pasted = None
@@ -396,7 +420,8 @@ if df is None:
     st.stop()
 
 df, colmap = standardize_columns(df)
-df = ensure_derived(df)
+if apply_calc_single:
+    df = ensure_derived(df)
 df, time_col = infer_time(df, dt_val)
 
 if smooth:

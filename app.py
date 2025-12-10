@@ -157,7 +157,7 @@ if mode == "Batch Processing":
         apply_calc_batch = calc_batch != "No Calculator"
         uploads = st.file_uploader("Files", type=["csv", "txt", "xlsx", "xls"], accept_multiple_files=True, key="batch_uploads")
         use_sample = st.checkbox("Include sample raw files", value=False, key="batch_use_sample")
-        smooth_batch = st.checkbox("Smooth", value=True, key="batch_smooth")
+        smooth_batch = st.checkbox("Smooth", value=False, key="batch_smooth")
         win_batch = st.slider("Window", 1, 21, 5, 2, key="batch_win")
         st.header("Time base")
         manual_dt_batch = st.checkbox("Set sampling interval (s)", key="batch_manual_dt")
@@ -398,7 +398,7 @@ with st.sidebar:
     else:
         st.caption("Sample dataset: Demo_dataset_1.xlsx")
     st.header("Preprocess")
-    smooth = st.checkbox("Smooth", value=True)
+    smooth = st.checkbox("Smooth", value=False)
     win = st.slider("Window", 1, 21, 5, 2)
     st.header("Time base")
     manual_dt = st.checkbox("Set sampling interval (s)")

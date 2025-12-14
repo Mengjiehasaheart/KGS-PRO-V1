@@ -4,7 +4,100 @@ import numpy as np
 from io import StringIO, BytesIO
 from typing import Optional, Tuple, Dict
 from tempfile import NamedTemporaryFile
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, column_index_from_string
+
+def _coerce_number(v):
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        if pd.isna(f):
+            return None
+        return f
+    except Exception:
+        pass
+    if isinstance(v, str):
+        cleaned = "".join([ch for ch in v if (ch.isdigit() or ch in ".-")])
+        if cleaned:
+            try:
+                f = float(cleaned)
+                if pd.isna(f):
+                    return None
+                return f
+            except Exception:
+                return None
+    return None
+
+def _extract_leaf_area_cm2(raw: pd.DataFrame) -> Optional[float]:
+    limit = min(len(raw), 50)
+    for i in range(limit - 1):
+        row_lower = [str(x).strip().lower() if isinstance(x, str) else None for x in raw.iloc[i]]
+        if any(x == "const" for x in row_lower):
+            next_row = raw.iloc[i + 1]
+            for idx, lab in enumerate(row_lower):
+                if lab in ("s", "leaf area", "leaf_area", "leafarea", "area"):
+                    val = _coerce_number(next_row.iloc[idx])
+                    if val is not None and val > 0:
+                        return float(val)
+        for idx, lab in enumerate(row_lower):
+            if lab in ("leaf area", "leaf_area", "leafarea"):
+                target = raw.iloc[i].iloc[idx + 1] if idx + 1 < len(raw.columns) else None
+                val = _coerce_number(target)
+                if val is not None and val > 0:
+                    return float(val)
+    return None
+
+def _extract_metadata(raw: pd.DataFrame) -> Dict[str, float]:
+    def cell_value(coord: str):
+        letters = "".join([ch for ch in coord if ch.isalpha()])
+        digits = "".join([ch for ch in coord if ch.isdigit()])
+        if not letters or not digits:
+            return None
+        try:
+            r = int(digits) - 1
+            c = column_index_from_string(letters) - 1
+        except Exception:
+            return None
+        if r < 0 or c < 0 or r >= len(raw) or c >= raw.shape[1]:
+            return None
+        return raw.iat[r, c]
+    coord_map = {
+        "leaf_area_cm2": "B7",
+        "k_ratio": "C7",
+        "d7_label": "D7",
+        "e7_value": "E7",
+        "d5": "D5",
+        "e5": "E5",
+        "f5": "F5",
+        "g5": "G5",
+        "h5": "H5",
+        "i5": "I5",
+        "j5": "J5",
+        "k5": "K5",
+        "b13": "B13",
+        "c13": "C13",
+        "f13": "F13",
+        "b15": "B15",
+        "c15": "C15",
+        "d15": "D15",
+        "e15": "E15",
+        "h15": "H15",
+    }
+    meta: Dict[str, float] = {}
+    for key, coord in coord_map.items():
+        val = cell_value(coord)
+        if key == "d7_label":
+            if isinstance(val, str) and val:
+                meta[key] = val
+            continue
+        num = _coerce_number(val)
+        if num is not None:
+            meta[key] = num
+    if "leaf_area_cm2" not in meta:
+        area = _extract_leaf_area_cm2(raw)
+        if area is not None:
+            meta["leaf_area_cm2"] = area
+    return meta
 
 def _try_read_csv(text: str) -> pd.DataFrame:
     try:
@@ -38,6 +131,8 @@ def _read_licor_excel_smart_path(path: str) -> pd.DataFrame:
         except Exception:
             raw = pd.read_excel(path, sheet_name=0, header=None)
     hdr = None
+    meta = _extract_metadata(raw)
+    area_cm2 = meta.get("leaf_area_cm2")
     for i in range(min(len(raw), 100)):
         vals = [str(v).strip().lower() for v in raw.iloc[i].tolist()]
         if any(v in ("obs","hhmmss","qin","a","gsw") for v in vals):
@@ -50,6 +145,10 @@ def _read_licor_excel_smart_path(path: str) -> pd.DataFrame:
     data = raw.iloc[start:].copy()
     data.columns = cols
     data = data.dropna(how="all").reset_index(drop=True)
+    if area_cm2 is not None:
+        data.attrs["leaf_area_cm2"] = area_cm2
+    if meta:
+        data.attrs["licor_meta"] = meta
     return data
 
 def _read_licor_excel_smart_bytes(data: BytesIO) -> pd.DataFrame:
@@ -58,6 +157,8 @@ def _read_licor_excel_smart_bytes(data: BytesIO) -> pd.DataFrame:
     except Exception:
         raw = pd.read_excel(data, sheet_name=0, header=None)
     hdr = None
+    meta = _extract_metadata(raw)
+    area_cm2 = meta.get("leaf_area_cm2")
     for i in range(min(len(raw), 100)):
         vals = [str(v).strip().lower() for v in raw.iloc[i].tolist()]
         if any(v in ("obs","hhmmss","qin","a","gsw") for v in vals):
@@ -71,6 +172,10 @@ def _read_licor_excel_smart_bytes(data: BytesIO) -> pd.DataFrame:
     data_df = raw.iloc[start:].copy()
     data_df.columns = cols
     data_df = data_df.dropna(how="all").reset_index(drop=True)
+    if area_cm2 is not None:
+        data_df.attrs["leaf_area_cm2"] = area_cm2
+    if meta:
+        data_df.attrs["licor_meta"] = meta
     return data_df
 
 def _read_excel_with_xlcalculator_path(path: str) -> pd.DataFrame:
@@ -91,6 +196,8 @@ def _read_excel_with_xlcalculator_path(path: str) -> pd.DataFrame:
     except Exception:
         raw = pd.read_excel(path, sheet_name=0, header=None, engine="openpyxl")
         sheet_name = None
+    meta = _extract_metadata(raw)
+    area_cm2 = meta.get("leaf_area_cm2")
     if sheet_name is None:
         try:
             sheet_name = pd.ExcelFile(path, engine="openpyxl").sheet_names[0]
@@ -110,40 +217,25 @@ def _read_excel_with_xlcalculator_path(path: str) -> pd.DataFrame:
     data_df.columns = cols
     data_df = data_df.reset_index(drop=True)
     sheet = sheet_name
+    if area_cm2 is not None:
+        data_df.attrs["leaf_area_cm2"] = area_cm2
+    if meta:
+        data_df.attrs["licor_meta"] = meta
     target_eval = set(["A","E","gsw","gtw","Ci","Ca","gbw","gbc","gsc","gtc","VPDleaf","RHcham","Pca","Pci"])
-    def has_all(names):
-        return all(n in data_df.columns for n in names)
-    skip_if_base = {
-        "A": ["CO2_r","CO2_s"],
-        "E": ["H2O_s","H2O_r"],
-        "gsw": ["gtw"],
-        "gtw": ["H2O_s","H2O_r","H2O_a","Tleaf","Pa"],
-        "Ca": ["CO2_r"],
-        "Ci": ["Ca","A"],
-        "gbw": ["Flow"],
-        "gsc": ["gsw"],
-        "gtc": ["gsc","gbc"],
-        "gbc": ["gbw"],
-    }
     eval_cols = set()
     for c in target_eval:
         if c not in data_df.columns:
             continue
         col_vals = pd.to_numeric(data_df[c], errors="coerce")
-        if col_vals.notna().any():
-            continue
-        base_need = skip_if_base.get(c, [])
-        if base_need and has_all(base_need):
+        max_abs = col_vals.abs().max()
+        all_zero_or_nan = col_vals.isna().all() or (pd.notna(max_abs) and float(max_abs)==0.0)
+        if not all_zero_or_nan:
             continue
         eval_cols.add(c)
     for r_idx in range(len(data_df)):
         excel_row = start + r_idx + 1
         for c_idx, c in enumerate(cols):
             if c not in eval_cols:
-                continue
-            cur = data_df.iloc[r_idx, c_idx]
-            needs_eval = isinstance(cur, str) and cur.strip().startswith("=")
-            if not needs_eval:
                 continue
             addr = f"{sheet}!{get_column_letter(c_idx+1)}{excel_row}"
             try:

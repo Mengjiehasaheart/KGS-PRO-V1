@@ -281,13 +281,13 @@ if mode == "Batch Processing":
         xlsx_buf = build_excel_buffer(merged_cached)
         st.download_button("Download merged XLSX", data=xlsx_buf.getvalue(), file_name="merged_processed.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.subheader("Batch analysis")
+        numeric_cols = [c for c in merged_cached.columns if pd.api.types.is_numeric_dtype(merged_cached[c]) and c not in ["file_id"]]
+        if "WUE" in merged_cached.columns and "WUE" not in numeric_cols:
+            numeric_cols.append("WUE")
         time_col_batch = "time_min" if "time_min" in merged_cached.columns else None
         if time_col_batch is None:
             st.warning("time_min not found; cannot plot batch averages")
         else:
-            numeric_cols = [c for c in merged_cached.columns if merged_cached[c].dtype!=object and c not in ["file_id"]]
-            if "WUE" in merged_cached.columns and "WUE" not in numeric_cols:
-                numeric_cols.append("WUE")
             if not numeric_cols:
                 st.warning("No numeric columns available for plotting")
                 value_col = None
@@ -317,6 +317,8 @@ if mode == "Batch Processing":
             default_vars.append("gsw")
         plot_vars = st.multiselect("Variables", options=[c for c in numeric_cols if c not in ["file_id"]], default=default_vars[:2], key="per_file_vars")
         files_pick = st.multiselect("Files", options=file_opts, default=file_opts[:1], key="per_file_files")
+        plot_trigger = st.button("Plot selected files", key="per_file_plot")
+        png_toggle = st.checkbox("Build PNG bundle (slower)", value=False, key="per_file_png")
         def make_per_file_fig(df, fid, vars_sel):
             import plotly.graph_objects as go
             sub = df[df["file_id"]==fid].copy()
@@ -359,21 +361,31 @@ if mode == "Batch Processing":
                 fig.update_yaxes(showgrid=False, showline=True, linewidth=2, linecolor="#0ABAB5", mirror=True, title=sec_title if sec_title else "", title_font=dict(size=14, color="#0ABAB5"), secondary_y=True)
             return fig
         perfile_figs = []
-        if files_pick and plot_vars:
-            for fid in files_pick:
-                fig_pf = make_per_file_fig(merged_cached, fid, plot_vars)
-                st.plotly_chart(fig_pf, use_container_width=True)
-                perfile_figs.append((fid, fig_pf))
-        if perfile_figs:
+        png_store = {}
+        if plot_trigger and files_pick and plot_vars:
+            max_workers = min(len(files_pick), max(1, multiprocessing.cpu_count() // 2))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(make_per_file_fig, merged_cached, fid, plot_vars): fid for fid in files_pick}
+                for fut in as_completed(futures):
+                    fid = futures[fut]
+                    try:
+                        fig_pf = fut.result()
+                    except Exception as e:
+                        st.error(f"Plot failed for {fid}: {e}")
+                        continue
+                    st.plotly_chart(fig_pf, use_container_width=True)
+                    perfile_figs.append((fid, fig_pf))
+                    if png_toggle:
+                        try:
+                            png_store[fid] = fig_pf.to_image(format="png", scale=3)
+                        except Exception:
+                            pass
+        if png_toggle and png_store:
             import zipfile
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for fid, fig_pf in perfile_figs:
-                    try:
-                        png_bytes = fig_pf.to_image(format="png", scale=3)
-                        zf.writestr(f"{fid}.png", png_bytes)
-                    except Exception:
-                        continue
+                for fid, data_png in png_store.items():
+                    zf.writestr(f"{fid}.png", data_png)
             zip_buf.seek(0)
             st.download_button("Download plotted files (PNG, 300 dpi approx)", data=zip_buf.getvalue(), file_name="batch_plots.zip", mime="application/zip")
     else:

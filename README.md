@@ -1,15 +1,26 @@
-# KGS‑PRO V1 (Preview)
-
+# KGS-PRO V2
 For analysis of dynamic photosynthesis (From LI‑6800 raw files),hosted on Streamlit (for dev preview).
 #### © Mengjie Fan 2024
 
-## Main Web Interface on Streamlit  
-![Interface](images/interface.png)
+## Batch demo (new 2025 updates)
+### Batch processing is now available in V2 using any of the calculator.  
+- Process limitless files (RAM limiting) with MF/XL/None calculators using parallel cores, 
+- I also included string split features for grouping columns, and then cached merged data
+- Exports: you can download merged CSV/XLSX with file_id, per-file summaries/errors, processed/partition outputs
+- I also added a progress UI with throughput and ETA (the estimation logic should be sound if all files are equal size); sample raw files supported in batch runs
+![Batch processing](images/batch_processing%20DEMO.gif)
 
-### Kinetics Model (demo)
-![Kinetics Model](images/kinetics_model.svg)
+## Run
+- From repo root: `pip install -r KGS-PRO-V1/requirements.txt`
+- Launch: `streamlit run KGS-PRO-V1/app.py`
 
-## Data Ingestion (LI‑6800): drag and drop raw xlsx file freshly from Li-6800
+## Core flow
+- Import LI-6800 CSV/XLSX or pasted tables; sample data included; column synonym mapping and time inference with manual interval fallback
+- (Single analysis only for the moment)Detect PPFD step up/down, tag phases, derive low/high levels; optional smoothing and guardrails to skip tiny signals
+- Fit single-tau stomatal kinetics for increase/decrease; gsmin/gsmax from phase endpoints; show RMSE/R2 overlays
+- Partition A into stomatal vs biochemical limitation via minimal Farquhar calibration; SL/BL time series and peaks
+- Derived metrics: t10/t50/t90 for A and gsw, deficits vs steady state, SLmax_approx
+
 
 ## Phase Detection should work most of the time (not tested for diurnal program yet)
  from smoothed PPFD (Qin or best alternative) using plateau aware crossings with fallback to gradient extrema in some cases
@@ -38,5 +49,3 @@ For analysis of dynamic photosynthesis (From LI‑6800 raw files),hosted on Stre
   - TL = (A_max − A) / A_max
 
 - Reference PDFs are bundled under “References” in the app for quick download.
-- Most tables and figures are downloadable if you hover over the right corner of these objects
-
